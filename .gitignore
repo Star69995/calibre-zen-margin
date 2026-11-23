@@ -90,3 +90,6 @@
 # src/calibre_zen/icons/assets/; the full upstream sets stay out of the repo.
 /.calibre-zen/icon-sources/
 /.calibre-zen/boox/*
+
+# Claude Code per-user permissions - may contain secrets from approved commands, never commit.
+.claude/settings.local.json
