@@ -122,6 +122,7 @@ class TestIdentity(unittest.TestCase):
             'src/calibre/utils/ipc/__init__.py',
             'src/calibre/linux.py',
             'src/calibre/gui2/update.py',
+            'src/calibre/utils/winreg/default_programs.py',
         }
         picks = picked_upstream_fixes(root)
         if any(subprocess.run(['git', '-C', root, 'cat-file', '-e', sha + '^{commit}'], capture_output=True).returncode for sha in picks):

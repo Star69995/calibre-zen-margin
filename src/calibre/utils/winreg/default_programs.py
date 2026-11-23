@@ -7,9 +7,10 @@ import time
 import traceback
 from threading import Thread
 from typing import TYPE_CHECKING, Self, cast
+from urllib.parse import quote
 
 from calibre import guess_type, prints
-from calibre.constants import DEBUG, __version__, isfrozen, isportable
+from calibre.constants import DEBUG, __appname__, __version__, isfrozen, isportable, zen_display_name
 from calibre.utils.localization import _
 from calibre.utils.lock import singleinstance
 from calibre.utils.winreg.lib import HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, Key
@@ -25,30 +26,55 @@ if TYPE_CHECKING:
 # See https://msdn.microsoft.com/en-us/library/windows/desktop/cc144154(v=vs.85).aspx
 
 
+# calibre-zen: the keys are calibre's frozen executables, which `extensions()`
+# is keyed on, but what gets registered is the fork's launcher for each
+# (`launcher_name()`): the frozen executable alone runs calibre's own bundled
+# Python, not this fork's. The registry names derive from the fork's identity,
+# not calibre's, so the fork installs beside calibre and Calibre Zen without
+# either overwriting the other's entries or unregistering them.
 def default_programs() -> dict[str, dict[str, str]]:
     return {
         'calibre.exe': {
             'icon_id': 'main_icon',
             'description': _('The main calibre program, used to manage your collection of e-books'),
             'capability_name': 'calibre64bit',
-            'name': 'calibre 64-bit',
-            'assoc_name': 'calibre64bit',
+            'name': zen_display_name,
+            'assoc_name': f'{__appname__}.Main',
         },
         'ebook-edit.exe': {
             'icon_id': 'editor_icon',
             'description': _('The calibre E-book editor. It can be used to edit common e-book formats.'),
             'capability_name': 'Editor64bit',
-            'name': 'calibre Editor 64-bit',
-            'assoc_name': 'calibreEditor64bit',
+            'name': f'{zen_display_name} Editor',
+            'assoc_name': f'{__appname__}.Editor',
         },
         'ebook-viewer.exe': {
             'icon_id': 'viewer_icon',
             'description': _('The calibre E-book viewer. It can view most known e-book formats.'),
             'capability_name': 'Viewer64bit',
-            'name': 'calibre Viewer 64-bit',
-            'assoc_name': 'calibreViewer64bit',
+            'name': f'{zen_display_name} Viewer',
+            'assoc_name': f'{__appname__}.Viewer',
         },
     }
+
+
+def launcher_name(program: str) -> str:
+    "The fork's launcher for one of calibre's frozen executables, as packaging/windows/package.ps1 names them."
+    from calibre.linux import path_name
+
+    # The GUI's launcher is named for the app itself; the viewer's and the editor's take the PATH prefix.
+    return path_name(f'{__appname__}.exe' if program == 'calibre.exe' else program)
+
+
+def installed_programs() -> dict[str, dict[str, str]]:
+    "`default_programs()` limited to those whose launcher is installed, with the launcher's full path as `exe`."
+    base = os.path.dirname(sys.executable)
+    ans = {}
+    for program, data in default_programs().items():
+        exe = os.path.join(base, launcher_name(program))
+        if os.path.exists(exe):
+            ans[program] = {**data, 'exe': exe}
+    return ans
 
 
 def extensions(basename: str) -> set[str] | None:
@@ -82,6 +108,21 @@ def check_allowed() -> None:
         raise NotAllowed('Not allowed to create associations for windows versions older than Windows 8')
     if 'CALIBRE_NO_DEFAULT_PROGRAMS' in os.environ:
         raise NotAllowed('Disabled by the CALIBRE_NO_DEFAULT_PROGRAMS environment variable')
+    if installer_declined():
+        raise NotAllowed('The installer was run without "Open e-book files with" ticked')
+
+
+def installer_declined() -> bool:
+    """
+    Whether the .msi was installed with its "Open e-book files with" feature
+    unticked. Ticking it writes `OpenWith` beside `InstallPath`; a zip has
+    neither, and registers as it always has.
+    """
+    try:
+        with Key(open_at=rf'Software\{__appname__}\Installer', root=HKEY_LOCAL_MACHINE) as key:
+            return key.get('InstallPath') is not None and key.get('OpenWith') is None
+    except OSError:
+        return False
 
 
 def create_prog_id(ext: str, prog_id: str, ext_map: dict[str, str], exe: str) -> None:
@@ -106,15 +147,21 @@ def progid_name(assoc_name: str, ext: str) -> str:
 
 
 def cap_path(data: dict[str, str]) -> str:
-    return r'Software\calibre\{}\Capabilities'.format(data['capability_name'])
+    return rf'Software\{__appname__}\{data["capability_name"]}\Capabilities'
+
+
+def is_registered() -> bool:
+    "Whether each installed program still has its Default Programs entry, which a reinstall or an uninstall removes."
+    try:
+        with Key(open_at=r'Software\RegisteredApplications') as key:
+            return all(key.get(data['name']) == cap_path(data) for data in installed_programs().values())
+    except OSError:
+        return False
 
 
 def register() -> None:
-    base = os.path.dirname(sys.executable)
-
-    for program, data in default_programs().items():
-        data = data.copy()
-        exe = os.path.join(base, program)
+    for program, data in installed_programs().items():
+        exe = data['exe']
         capabilities_path = cap_path(data)
         ext_map = {ext.lower(): guess_type('file.' + ext.lower())[0] for ext in extensions(program)}  # ty: ignore[not-iterable]
         ext_map = {ext: mt for ext, mt in ext_map.items() if mt}
@@ -139,6 +186,11 @@ def register() -> None:
             key.set(data['name'], capabilities_path)
 
     winutil.notify_associations_changed()
+
+
+def open_default_apps_page(name: str) -> None:
+    "Windows Settings, on the page that lists what the program registered as `name` can open."
+    os.startfile('ms-settings:defaultapps?registeredAppUser=' + quote(name))
 
 
 def unregister() -> None:
@@ -179,7 +231,10 @@ class Register(Thread):
         except NotAllowed:
             return
         if singleinstance('register_default_programs'):
-            if self.prefs.get('windows_register_default_programs', None) != __version__:
+            # calibre-zen: the version alone is not enough. Uninstalling removes the
+            # entries but leaves the settings, so a reinstall of the same version
+            # would never register again.
+            if self.prefs.get('windows_register_default_programs', None) != __version__ or not is_registered():
                 self.prefs['windows_register_default_programs'] = __version__
                 if DEBUG:
                     st = time.monotonic()
@@ -187,6 +242,18 @@ class Register(Thread):
                 register()
                 if DEBUG:
                     prints(f'Registered with default programs in {time.monotonic() - st:.1f} seconds')
+                self.offer_default_apps_page()
+
+    def offer_default_apps_page(self) -> None:
+        # calibre-zen: Windows will not let a program make itself the default
+        # for a file type, so the first time it is registered the person is taken
+        # to the page where they can. Once only: after that it is their call.
+        if self.prefs.get('windows_default_apps_shown', False):
+            return
+        self.prefs['windows_default_apps_shown'] = True
+        viewer = installed_programs().get('ebook-viewer.exe')
+        if viewer is not None:
+            open_default_apps_page(viewer['name'])
 
     def __enter__(self) -> Self:
         return self

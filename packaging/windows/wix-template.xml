@@ -81,6 +81,12 @@
         <Component Id="RememberInstallDir">
             <RegistryValue Root="HKLM" Key="Software\@APP@\Installer" Name="InstallPath" Type="string" Value="[APPLICATIONFOLDER]" KeyPath="yes" />
         </Component>
+        <!-- Only a flag: the app does the registering when it starts, from the
+             fork's own Python (calibre.utils.winreg.default_programs), and
+             does none when this value is missing next to InstallPath. -->
+        <Component Id="OpenWithFlag">
+            <RegistryValue Root="HKLM" Key="Software\@APP@\Installer" Name="OpenWith" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
     </DirectoryRef>
 
     <DirectoryRef Id="ApplicationProgramsFolder">
@@ -122,6 +128,10 @@
 
         <Feature Id="DS" Title="Shortcut on desktop" Level="1" Description="Shortcut to @DISPLAY_NAME@ on your desktop">
             <ComponentRef Id="DesktopShortcut" />
+        </Feature>
+
+        <Feature Id="FOpenWith" Title="Open e-book files with @DISPLAY_NAME@" Level="1" Description="List @DISPLAY_NAME@ under Open with for e-book files such as EPUB. Other calibre installs are not changed. Windows does not let a program make itself the default, so you are taken to Settings to choose it">
+            <ComponentRef Id="OpenWithFlag" />
         </Feature>
 
         <Feature Id="FAddToPath" Title="Add command-line tools to path" Level="1" Description="Add the zen-* command-line tools to PATH. calibre's own tools, if installed, are not affected">
